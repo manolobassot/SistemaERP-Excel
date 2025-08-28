@@ -1,0 +1,119 @@
+Pasos para generar la factura:
+
+-Private.key (Openssl) Codigo:openssl genrsa -out MiClavePrivada.key 2048
+
+-certificado.csr (Openssl+Private.key) Codigo:openssl req -new -key MiClavePrivada.key -subj "/C=AR/O=Empresa/CN=Sistema/serialNumber=CUIT nnnnnnnnnnn" -out MiPedidoCSR.csr
+
+-certificado.crt (Pagina ARCA) Administracion de certificados digitales-Nuevo alias
+
+-Autorizar crt (Pagina ARCA) Administracion de relaciones-Nueva relacion-Factura Electronica
+
+-Punto de Venta (Pagina ARCA) Administracion de puntos de venta y domicilios-Nuevo punto de venta-Facturacion electronica Web Service
+
+-Token y Firma (PowerShell) Codigo:
+[CmdletBinding()]
+Param(
+   [Parameter(Mandatory=$False)]
+   [string]$Certificado="myCert.crt", #Colocar nombre certificado real
+	
+   [Parameter(Mandatory=$False)]
+   [string]$ClavePrivada="myPrivate.key", #Colocar nombre key real
+   
+   [Parameter(Mandatory=$False)]
+   [string]$ServicioId="wsfe",
+   
+   [Parameter(Mandatory=$False)]
+   [string]$OutXml="LoginTicketRequest.xml",   
+   
+   [Parameter(Mandatory=$False)]
+   [string]$OutCms="LoginTicketRequest.xml.cms",   
+
+   [Parameter(Mandatory=$False)]
+   [string]$WsaaWsdl = "https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL") 
+$ErrorActionPreference = "Stop"
+$dtNow = Get-Date 
+$xmlTA = New-Object System.XML.XMLDocument
+$xmlTA.LoadXml('<loginTicketRequest><header><uniqueId></uniqueId><generationTime></generationTime><expirationTime></expirationTime></header><service></service></loginTicketRequest>')
+$xmlUniqueId = $xmlTA.SelectSingleNode("//uniqueId")
+$xmlGenTime = $xmlTA.SelectSingleNode("//generationTime")
+$xmlExpTime = $xmlTA.SelectSingleNode("//expirationTime")
+$xmlService = $xmlTA.SelectSingleNode("//service")
+$xmlGenTime.InnerText = $dtNow.AddMinutes(-10).ToString("s")
+$xmlExpTime.InnerText = $dtNow.AddMinutes(+10).ToString("s")
+$xmlUniqueId.InnerText = $dtNow.ToString("yyMMddHHMM")
+$xmlService.InnerText = $ServicioId
+$seqNr = Get-Date -UFormat "%Y%m%d%H%S"
+$xmlTA.InnerXml | Out-File $seqNr-$OutXml -Encoding ASCII
+openssl cms -sign -in $seqNr-$OutXml -signer $Certificado -inkey $ClavePrivada -nodetach -outform der -out $seqNr-$OutCms-DER
+openssl base64 -in $seqNr-$OutCms-DER -e -out $seqNr-$OutCms-DER-b64
+try{
+   $cms = Get-Content $seqNr-$OutCms-DER-b64 -Raw
+   $wsaa = New-WebServiceProxy -Uri $WsaaWsdl -ErrorAction Stop
+   $wsaaResponse = $wsaa.loginCms($cms) 
+   $wsaaResponse > $seqNr-loginTicketResponse.xml 
+   $wsaaResponse}
+catch{
+   $errMsg = $_.Exception.Message
+   $errMsg > $seqNr-loginTicketResponse-ERROR.xml 
+   $errMsg}
+
+-Solicitud del CAE 
+Link produccion: https://servicios1.afip.gov.ar/wsfev1/service.asmx
+Codigo:
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/
+envelope/" xmlns:ar="http://ar.gov.afip.dif.FEV1/">
+ <soapenv:Header/>
+ <soapenv:Body>
+ 	<ar:FECAESolicitar>
+ 	<ar:Auth>
+ 		<ar:Token>string</ar:Token>		#Sustituir por token solicitado
+ 		<ar:Sign>string</ar:Sign>		#Sustituir por firma solicitada
+ 		<ar:Cuit>long</ar:Cuit>			#Colocar Cuit
+	 </ar:Auth>
+ 	<ar:FeCAEReq>
+	 <ar:FeCabReq>
+ 		<ar:CantReg>1</ar:CantReg>		#Cantidad de Facturas
+ 		<ar:PtoVta>1</ar:PtoVta>		#Colocar punto de venta generado
+ 		<ar:CbteTipo>int</ar:CbteTipo>		#Tipo de factura 1=A, 6=B (consumidor final), 11=C 
+	 </ar:FeCabReq>
+ 	<ar:FeDetReq>
+ 		<ar:FECAEDetRequest>
+			<ar:Concepto>1</ar:Concepto>			#Tipo de operacion: 1-Productos 2-Servicios 3-Productos y Servicios
+			<ar:DocTipo>int</ar:DocTipo>			#Tipo de doc del cliente: 80-CUIT, 86-CUIL, 96-DNI, 99-Consumidor Final
+			<ar:DocNro>long</ar:DocNro>			#Numero de doc del cliente, segun lo ingresado arriba
+			<ar:CbteDesde>long</ar:CbteDesde> 		#Numero de factura
+			<ar:CbteHasta>long</ar:CbteHasta>		#Si es una sola factura mismo valor que arriba
+			<ar:CbteFch>string</ar:CbteFch>			#Fecha de facturacion (AAAAMMDD)
+			<ar:ImpTotal>double</ar:ImpTotal>		#Importe total de la factura c/IVA
+			<ar:ImpTotConc>0</ar:ImpTotConc>		#Importe no gravado, 0 por defecto si no hay
+			<ar:ImpNeto>double</ar:ImpNeto>			#Importe neto s/IVA
+			<ar:ImpOpEx>0</ar:ImpOpEx>			#Importe exento, 0 por defecto si no hay
+			<ar:ImpTrib>double</ar:ImpTrib>			#Total de impuestos adicionales como ingresos brutos o impuestos municipales.
+			<ar:ImpIVA>double</ar:ImpIVA>			#Total del IVA aplicado a la factura.
+			<ar:FchServDesde></ar:FchServDesde>		#Solo se usan si la factura es de servicios
+			<ar:FchServHasta></ar:FchServHasta>		#Si la factura es de productos, deben enviarse vacíos.
+			<ar:FchVtoPago></ar:FchVtoPago>			#Fecha de vencimiento del pago, solo se usa en servicios 
+			<ar:MonId>PES</ar:MonId>			#Moneda en la que se emite el compobante PES-Peso arg, USD-Dolar, EUR-Euro
+			<ar:MonCotiz>1</ar:MonCotiz>			#Cotización de la moneda utilizada respecto del peso argentino (1 si es en pesos).
+			<ar:CbtesAsoc>				#Seccion de comprobante asociado se elimina si no se usa.
+			 <ar:CbteAsoc>					#Se usa cuando:Se emite una Nota de Crédito o Nota de Débito, ya que deben asociarse a la factura que están corrigiendo.Se refactura una operación previa y es necesario vincular el nuevo comprobante al anterior.
+ 				<ar:Tipo>short</ar:Tipo>		#Indica el tipo de comprobante al que se asocia esta solicitud.Ejemplo: Si se emite una Nota de Crédito A, debe asociarse a una Factura A (Tipo=1).
+				<ar:PtoVta>int</ar:PtoVta>		#Indica el punto de venta del comprobante asociado.
+				<ar:Nro>Long</ar:Nro>			#Número del comprobante asociado.
+				<ar:Cuit>String</ar:Cuit>		#CUIT del emisor del comprobante asociado.Si se trata de una Nota de Crédito o Débito, este CUIT debe coincidir con el de la factura original​
+				<ar:CbteFch>String</ar:CbteFch>		#Fecha del comprobante asociado en formato AAAAMMDD.
+			 </ar:CbteAsoc>
+ 			</ar:CbtesAsoc>
+			<ar:Iva>
+			 <ar:AlicIva>
+ 				<ar:Id>short</ar:Id>			#Indica la alícuota de IVA aplicada.3 → 0%, 4 → 10.5%, 5 → 21%, 6 → 27%, 8 → 5%, 9 → 2.5%
+				<ar:BaseImp>double</ar:BaseImp>		#Debe ser mayor a 0 y coincidir con el valor correspondiente en <ar:ImpNeto>.
+				<ar:Importe>double</ar:Importe>		#Debe ser igual a BaseImp * (Alicuota / 100).
+			 </ar:AlicIva>
+ 			</ar:Iva>
+ 		 </ar:FECAEDetRequest>
+		</ar:FeDetReq>
+ 	      </ar:FeCAEReq>
+            </ar:FECAESolicitar>
+        </soapenv:Body>
+</soapenv:Envelope>
